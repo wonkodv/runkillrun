@@ -8,7 +8,7 @@ use std::sync::mpsc::channel;
 #[derive(Debug)]
 enum Message {
     FileWatch(Result<notify::Event, notify::Error>),
-    ProcessWatch(Result<ExitStatus, std::io::Error>),
+    ProcessWatch(Result<ExitStatus, std::io::Error>, u32),
 }
 
 fn main() {
@@ -23,6 +23,7 @@ fn main() {
             eprintln!("[RKR]     -   42 on error");
             eprintln!("[RKR]     -   43 if the target exited due to a signal");
             eprintln!("[RKR]     -   return code of the target process if target exits normally");
+            eprintln!("[RKR] -   rkr only prints to stderr, each line is prefixed with `[RKR] `");
             exit(42);
         }
     };
@@ -35,15 +36,11 @@ fn try_main() -> Result<i32, String> {
     }
 
     let exe = &args[1];
+    let exe_path = Path::new(exe);
     let args = &args[2..];
 
-    match std::fs::metadata(exe) {
-        Err(err) => return Err(format!("Can not inspect {exe}: {err}")),
-        Ok(stat) => {
-            if !stat.is_file() {
-                return Err(format!("Not a file: {exe}"));
-            }
-        }
+    if !exe_path.is_file() {
+        return Err(format!("Not a File: {exe}"));
     }
 
     let (tx, rx) = channel();
@@ -72,16 +69,13 @@ fn try_main() -> Result<i32, String> {
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let wait = child.wait();
-                eprintln!("[RKR] Target exited: {wait:?}");
-                tx.send(Message::ProcessWatch(wait)).unwrap();
+                tx.send(Message::ProcessWatch(wait, child.id())).unwrap();
             });
         }
         // inner Loop to not respawn on all the uninteresting file events
         loop {
-            match rx.recv().expect("pipes work") {
-                Message::FileWatch(Err(err)) => {
-                    return Err(format!("File Watch Error: {err}"));
-                }
+            let message = rx.recv().expect("pipes work");
+            match message {
                 Message::FileWatch(Ok(Event {
                     kind: EventKind::Modify(_),
                     ..
@@ -90,25 +84,43 @@ fn try_main() -> Result<i32, String> {
                     kind: EventKind::Create(_),
                     ..
                 })) => {
-                    eprintln!("[RKR] File Changed, killing {child_pid}");
-                    if unsafe { libc::kill(child_pid as i32, libc::SIGINT) } != 0 {
-                        return Err(format!("can not kill {child_pid}"));
-                    }
-                    if let Message::ProcessWatch(Ok(return_code)) = rx.recv().expect("pipes work") {
-                        if return_code.signal() == Some(libc::SIGINT) {
-                            continue 'respawn;
+                    if exe_path.is_file() {
+                        eprintln!("[RKR] File Changed, killing {child_pid}");
+                        if unsafe { libc::kill(child_pid as i32, libc::SIGINT) } != 0 {
+                            return Err(format!("can not kill {child_pid}"));
                         }
-                        eprintln!("[RKR] Process exited after we killed it, but with an unexpected signal: {return_code}");
-                        exit(return_code.code().unwrap_or(43));
+
+                        eprintln!("[RKR] Waiting for target to return");
+                        loop {
+                            match rx.recv().expect("pipes work") {
+                                Message::ProcessWatch(Ok(return_code), pid) => {
+                                    assert_eq!(pid, child_pid);
+                                    if return_code.signal() == Some(libc::SIGINT) {
+                                        eprintln!("[RKR] Process {pid} exited after we killed it");
+                                        continue 'respawn;
+                                    }
+                                    eprintln!("[RKR] Process exited after we killed it, but with an unexpected signal: {return_code}");
+                                    exit(return_code.code().unwrap_or(43));
+                                }
+                                Message::FileWatch(Ok(_)) => {
+                                    // ignore other modification infos
+                                }
+                                err => {
+                                    return Err(format!("{err:?}"));
+                                }
+                            }
+                        }
+                    } else {
+                        eprintln!("[RKR] File no longer exists, Wait for it to appear again");
                     }
                 }
                 Message::FileWatch(Ok(_)) => {}
-                Message::ProcessWatch(Err(err)) => {
-                    return Err(format!("Process Wait Error: {err}"));
-                }
-                Message::ProcessWatch(Ok(return_code)) => {
-                    eprintln!("[RKR] Process exited: {return_code}");
+                Message::ProcessWatch(Ok(return_code), pid) => {
+                    eprintln!("[RKR] Process {pid} exited: {return_code}");
                     exit(return_code.code().unwrap_or(43));
+                }
+                err => {
+                    return Err(format!("{err:?}"));
                 }
             }
         }
