@@ -1,0 +1,12 @@
+[package]
+name = "runkillrun"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rkr"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2.169"
+notify = "7.0.0"
