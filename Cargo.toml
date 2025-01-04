@@ -1,6 +1,7 @@
 [package]
 name = "runkillrun"
-version = "0.1.0"
+description = "*Run* an executable Program. When the exe file changes *kill* the old process. *Run* the new exe again."
+version = "0.1.0" # keep in synch with flake.nix package version
 edition = "2021"
 
 [[bin]]
