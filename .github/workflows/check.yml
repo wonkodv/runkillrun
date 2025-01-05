@@ -8,10 +8,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - name: build
-        id: build
-        run: |
-          apt install nix
-          nix flake build
-          nix flake check
+      - name: Install Nix
+        run: curl -L https://nixos.org/nix/install | sh
+      - name: Build
+        run: nix flake build
+      - name: check
+        run: nix flake check
 
