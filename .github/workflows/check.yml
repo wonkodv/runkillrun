@@ -1,0 +1,16 @@
+on: [push, pull_request]
+
+name: Continuous integration
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: build
+        id: build
+        run: |
+          nix flake build
+          nix flake check
+
