@@ -11,6 +11,7 @@ jobs:
       - name: build
         id: build
         run: |
+          apt install nix
           nix flake build
           nix flake check
 
