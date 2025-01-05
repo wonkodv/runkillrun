@@ -1,19 +1,15 @@
-use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::env;
-use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{exit, Command, ExitStatus};
-use std::sync::mpsc::channel;
+use std::process::{exit, Command};
+use std::time::{Duration, SystemTime};
 
-#[derive(Debug)]
-enum Message {
-    FileWatch(Result<notify::Event, notify::Error>),
-    ProcessWatch(Result<ExitStatus, std::io::Error>, u32),
-}
+use anyhow::Result;
+use anyhow::{bail, Context};
 
 fn main() {
     match try_main() {
-        Ok(rc) => exit(rc),
+        Ok(Some(rc)) => exit(rc),
+        Ok(None) => exit(43),
         Err(message) => {
             eprintln!("[RKR] {message}");
             eprintln!("[RKR] Usage: rkr EXE [ARG *]");
@@ -29,98 +25,68 @@ fn main() {
     };
 }
 
-fn try_main() -> Result<i32, String> {
+fn get_meta(path: &Path) -> Result<(u64, SystemTime, SystemTime)> {
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("Can't get MetaData for {path:?}"))?;
+    Ok((
+        metadata.len(),
+        metadata
+            .modified()
+            .with_context(|| format!("Can't get mtime for {path:?}"))?,
+        metadata
+            .created()
+            .with_context(|| format!("Can't get ctime for {path:?}"))?,
+    ))
+}
+
+fn try_main() -> Result<Option<i32>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        return Err("Not enough arguments".to_owned());
+        bail!("Not enough Arguments");
     }
 
     let exe = &args[1];
     let exe_path = Path::new(exe);
     let args = &args[2..];
 
-    if !exe_path.is_file() {
-        return Err(format!("Not a File: {exe}"));
-    }
+    loop {
+        let meta = get_meta(exe_path)?;
+        eprintln!("[RKR] Meta for {exe} {meta:?}");
 
-    let (tx, rx) = channel();
-
-    let mut watcher = {
-        let tx = tx.clone();
-        notify::recommended_watcher(move |event| {
-            tx.send(Message::FileWatch(event)).unwrap();
-        })
-        .map_err(|err| format!("Can not watch {exe}: {err}"))?
-    };
-    watcher
-        .watch(Path::new(exe), RecursiveMode::NonRecursive)
-        .map_err(|err| format!("Can not watch {exe}: {err}"))?;
-
-    'respawn: loop {
         eprintln!("[RKR] Spawning {exe} {args:?}");
         let mut child = Command::new(exe)
             .args(args)
             .spawn()
-            .map_err(|err| format!("Error spawning Process: {err}"))?;
+            .with_context(|| format!("Error spawning Process {exe}"))?;
 
         let child_pid = child.id();
         eprintln!("[RKR] Target has {child_pid}");
-        {
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let wait = child.wait();
-                tx.send(Message::ProcessWatch(wait, child.id())).unwrap();
-            });
-        }
-        // inner Loop to not respawn on all the uninteresting file events
-        loop {
-            let message = rx.recv().expect("pipes work");
-            match message {
-                Message::FileWatch(Ok(Event {
-                    kind: EventKind::Modify(_),
-                    ..
-                }))
-                | Message::FileWatch(Ok(Event {
-                    kind: EventKind::Create(_),
-                    ..
-                })) => {
-                    if exe_path.is_file() {
-                        eprintln!("[RKR] File Changed, killing {child_pid}");
-                        if unsafe { libc::kill(child_pid as i32, libc::SIGINT) } != 0 {
-                            return Err(format!("can not kill {child_pid}"));
-                        }
 
-                        eprintln!("[RKR] Waiting for target to return");
-                        loop {
-                            match rx.recv().expect("pipes work") {
-                                Message::ProcessWatch(Ok(return_code), pid) => {
-                                    assert_eq!(pid, child_pid);
-                                    if return_code.signal() == Some(libc::SIGINT) {
-                                        eprintln!("[RKR] Process {pid} exited after we killed it");
-                                        continue 'respawn;
-                                    }
-                                    eprintln!("[RKR] Process exited after we killed it, but with an unexpected signal: {return_code}");
-                                    exit(return_code.code().unwrap_or(43));
-                                }
-                                Message::FileWatch(Ok(_)) => {
-                                    // ignore other modification infos
-                                }
-                                err => {
-                                    return Err(format!("{err:?}"));
-                                }
-                            }
-                        }
-                    } else {
-                        eprintln!("[RKR] File no longer exists, Wait for it to appear again");
+        'poll: loop {
+            std::thread::sleep(Duration::from_secs(1));
+            if let Some(return_code) = child
+                .try_wait()
+                .context(format!("Waiting on target process {child:?}"))?
+            {
+                eprintln!("[RKR] Target {child_pid} exited with {return_code}");
+                return Ok(return_code.code());
+            };
+
+            match get_meta(exe_path) {
+                Err(err) => {
+                    eprintln!(
+                        "[RKR] can not get Meta for {exe}, waiting for file to appear. ({err:?})"
+                    );
+                }
+                Ok(new_meta) => {
+                    if new_meta != meta {
+                        eprintln!(
+                            "[RKR] File Changed: {meta:?} != {new_meta:?}. killing {child_pid}"
+                        );
+                        child.kill()?;
+                        child.wait()?;
+                        break 'poll;
                     }
-                }
-                Message::FileWatch(Ok(_)) => {}
-                Message::ProcessWatch(Ok(return_code), pid) => {
-                    eprintln!("[RKR] Process {pid} exited: {return_code}");
-                    exit(return_code.code().unwrap_or(43));
-                }
-                err => {
-                    return Err(format!("{err:?}"));
                 }
             }
         }
