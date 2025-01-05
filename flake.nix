@@ -30,10 +30,12 @@
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "rkr";
-          version = "0.1.0"; # keep in synch with Cargo.toml version
+          version = "0.2.0"; # keep in synch with Cargo.toml version
           src = ./.;
 
-          cargoHash = "sha256-yS9jl2PX0uXWtYecmKy62DY7q/xhdYb/DkMrpkbybUk=";
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+          };
 
           meta = with pkgs.lib; {
             description = "A simple Rust CLI application";
@@ -47,6 +49,24 @@
           type = "app";
           program = "${self.packages.${system}.default}/bin/rkr";
         };
+
+        checks.format =
+          pkgs.runCommandLocal "check formatting"
+            {
+              src = ./.;
+              nativeBuildInputs = with pkgs; [
+                rustfmt
+                cargo
+                nixfmt-rfc-style
+              ];
+            }
+            ''
+              pwd
+                cargo fmt --manifest-path ${./.}/Cargo.toml -- --check
+                nixfmt --check ${./.}/flake.nix
+                touch $out
+            '';
+        checks.build = self.packages.${system}.default;
       }
     );
 }
